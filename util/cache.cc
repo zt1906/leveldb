@@ -50,7 +50,7 @@ struct LRUHandle {
   bool in_cache;      // Whether entry is in the cache.
   uint32_t refs;      // References, including cache reference, if present.
   uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
-  char key_data[1];   // Beginning of key
+  char key_data[1];   // Beginning of key.  备注：char key_data[1] 定义一个可变长的字符数组，然后在运行时动态地分配内存空间来改变数组的大小。
 
   Slice key() const {
     // next_ is only equal to this if the LRU handle is the list head of an
@@ -194,7 +194,7 @@ class LRUCache {
 
   HandleTable table_;
 };
-
+// 初始化两个链表的辅助节点，pre和next都指向自己
 LRUCache::LRUCache()
     : usage_(0) {
   // Make empty circular linked lists.
@@ -203,7 +203,7 @@ LRUCache::LRUCache()
   in_use_.next = &in_use_;
   in_use_.prev = &in_use_;
 }
-
+// 析构函数，需要确保in_use的链表是空，才做Unref操作。
 LRUCache::~LRUCache() {
   assert(in_use_.next == &in_use_);  // Error if caller has an unreleased handle
   for (LRUHandle* e = lru_.next; e != &lru_; ) {
@@ -223,7 +223,7 @@ void LRUCache::Ref(LRUHandle* e) {
   }
   e->refs++;
 }
-
+// 如果handle的ref等于0，则free掉。ref==1则说明不在in_use中。加入lru_中。
 void LRUCache::Unref(LRUHandle* e) {
   assert(e->refs > 0);
   e->refs--;
@@ -236,12 +236,12 @@ void LRUCache::Unref(LRUHandle* e) {
     LRU_Append(&lru_, e);
   }
 }
-
+// 只是将e的前后指针全部断掉，并不free空间！
 void LRUCache::LRU_Remove(LRUHandle* e) {
   e->next->prev = e->prev;
   e->prev->next = e->next;
 }
-
+// 双链表尾插元素
 void LRUCache::LRU_Append(LRUHandle* list, LRUHandle* e) {
   // Make "e" newest entry by inserting just before *list
   e->next = list;
@@ -249,28 +249,28 @@ void LRUCache::LRU_Append(LRUHandle* list, LRUHandle* e) {
   e->prev->next = e;
   e->next->prev = e;
 }
-
+// 查找的时候加上互斥锁
 Cache::Handle* LRUCache::Lookup(const Slice& key, uint32_t hash) {
   MutexLock l(&mutex_);
-  LRUHandle* e = table_.Lookup(key, hash);
+  LRUHandle* e = table_.Lookup(key, hash); // 在hashtable中根据hash值快速查找
   if (e != NULL) {
     Ref(e);
   }
   return reinterpret_cast<Cache::Handle*>(e);
 }
-
+// 释放的时候也加互斥锁
 void LRUCache::Release(Cache::Handle* handle) {
   MutexLock l(&mutex_);
   Unref(reinterpret_cast<LRUHandle*>(handle));
 }
-
+// 插入的时候也加互斥锁
 Cache::Handle* LRUCache::Insert(
     const Slice& key, uint32_t hash, void* value, size_t charge,
     void (*deleter)(const Slice& key, void* value)) {
   MutexLock l(&mutex_);
 
   LRUHandle* e = reinterpret_cast<LRUHandle*>(
-      malloc(sizeof(LRUHandle)-1 + key.size()));
+      malloc(sizeof(LRUHandle)-1 + key.size())); // 可变长度数组的长度为key.size()
   e->value = value;
   e->deleter = deleter;
   e->charge = charge;
@@ -283,15 +283,15 @@ Cache::Handle* LRUCache::Insert(
   if (capacity_ > 0) {
     e->refs++;  // for the cache's reference.
     e->in_cache = true;
-    LRU_Append(&in_use_, e);
-    usage_ += charge;
-    FinishErase(table_.Insert(e));
-  } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
+    LRU_Append(&in_use_, e); // 新节点加入到in_use链表
+    usage_ += charge; // 更新usage_值
+    FinishErase(table_.Insert(e)); // 插入in_use表的同时，插入Hash表, 这里为什么要做FinishErase????
+  } else {  // don't cache. (capacity_==0 is supported and turns off caching.) // 禁用缓存
     // next is read by key() in an assert, so it must be initialized
     e->next = NULL;
   }
-  while (usage_ > capacity_ && lru_.next != &lru_) {
-    LRUHandle* old = lru_.next;
+  while (usage_ > capacity_ && lru_.next != &lru_) { // 新插入后，如果触发了阈值（usage_ > capacity_）且lru_链表非空的时候
+    LRUHandle* old = lru_.next; // 删除最旧的一个节点，Erasex操作。
     assert(old->refs == 1);
     bool erased = FinishErase(table_.Remove(old->key(), old->hash));
     if (!erased) {  // to avoid unused variable when compiled NDEBUG
@@ -314,12 +314,14 @@ bool LRUCache::FinishErase(LRUHandle* e) {
   }
   return e != NULL;
 }
-
+// 1. Erase操作要加互斥锁
+// 2. Hash表中移除handle
+// 3. 从cache中移除*e
 void LRUCache::Erase(const Slice& key, uint32_t hash) {
   MutexLock l(&mutex_);
   FinishErase(table_.Remove(key, hash));
 }
-
+// 整个lru_链表中的缓存节点全部删除
 void LRUCache::Prune() {
   MutexLock l(&mutex_);
   while (lru_.next != &lru_) {
@@ -334,17 +336,17 @@ void LRUCache::Prune() {
 
 static const int kNumShardBits = 4;
 static const int kNumShards = 1 << kNumShardBits;
-
+// 共享全局缓冲区，大小为16的数组。每个slot都是一个LRUCache
 class ShardedLRUCache : public Cache {
  private:
-  LRUCache shard_[kNumShards];
+  LRUCache shard_[kNumShards]; // 默认缓冲区有16个
   port::Mutex id_mutex_;
   uint64_t last_id_;
-
+// 小而短的内联函数，编译之前展开。
   static inline uint32_t HashSlice(const Slice& s) {
     return Hash(s.data(), s.size(), 0);
   }
-
+// Hash分片函数，将hash右移28位，开头的4位表示16种结果，正好对应shard_中的每个slot。
   static uint32_t Shard(uint32_t hash) {
     return hash >> (32 - kNumShardBits);
   }
@@ -354,7 +356,7 @@ class ShardedLRUCache : public Cache {
       : last_id_(0) {
     const size_t per_shard = (capacity + (kNumShards - 1)) / kNumShards;
     for (int s = 0; s < kNumShards; s++) {
-      shard_[s].SetCapacity(per_shard);
+      shard_[s].SetCapacity(per_shard); // 设置shard_数组中每个slot LRUCache保存缓存节点的最大数量。
     }
   }
   virtual ~ShardedLRUCache() { }

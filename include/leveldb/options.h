@@ -122,8 +122,8 @@ struct LEVELDB_EXPORT Options {
   // Another reason to increase this parameter might be when you are
   // initially populating a large database.
   //
-  // Default: 2MB
-  size_t max_file_size;
+  // Default: 2MB // 备注：针对大多数Linux机器，ext3/4 FS是主流。也就意味着作者此处考虑到ext FS针对小文件效率更高。
+  size_t max_file_size; // 2MB可以保证ext不会有大量的中间索引块。也就提高了检索效率。
 
   // Compress blocks using the specified compression algorithm.  This
   // parameter can be changed dynamically.
